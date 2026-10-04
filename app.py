@@ -2,294 +2,263 @@ import streamlit as st
 import pandas as pd
 import mysql.connector
 import plotly.express as px
-import plotly.graph_objects as go
 import bcrypt
 import os
 from dotenv import load_dotenv
+from datetime import datetime
 
-# ==========================================
-# CONFIGURACIÓN INICIAL DE LA PÁGINA
-# ==========================================
-st.set_page_config(
-    page_title="Radar Compra Ágil Chile",
-    page_icon="🇨🇱",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Cargar variables de entorno
+# ==============================================================================
+# CONFIGURACIÓN INICIAL
+# ==============================================================================
+st.set_page_config(page_title="Radar Compra Ágil", page_icon="🇨🇱", layout="wide")
 load_dotenv()
 
-# Inicializar variables de sesión para el sistema de login
-if 'logueado' not in st.session_state:
-    st.session_state['logueado'] = False
-    st.session_state['rol'] = None
-    st.session_state['username'] = None
-
-# ==========================================
+# ==============================================================================
 # CONEXIÓN A BASE DE DATOS
-# ==========================================
-# st.cache_resource evita que Streamlit abra una nueva conexión cada vez que haces clic en la página
+# ==============================================================================
 @st.cache_resource
 def conectar_db():
+    return mysql.connector.connect(
+        host=os.getenv("DB_HOST"), port=os.getenv("DB_PORT"),
+        user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),
+        database=os.getenv("DB_NAME")
+    )
+
+# ==============================================================================
+# SISTEMA DE AUTENTICACIÓN (LOGIN / REGISTRO)
+# ==============================================================================
+def hashear_password(password):
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verificar_password(password, password_hash):
+    return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+
+def registrar_usuario(username, password, palabras_clave):
+    conn = conectar_db()
+    cursor = conn.cursor()
     try:
-        conn = mysql.connector.connect(
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            database=os.getenv("DB_NAME")
-        )
-        return conn
-    except Exception as e:
-        st.error(f"Error al conectar con la base de datos en Aiven: {e}")
-        return None
+        hash_pw = hashear_password(password)
+        cursor.execute("INSERT INTO usuarios (username, password_hash, palabras_clave) VALUES (%s, %s, %s)", 
+                       (username, hash_pw, palabras_clave))
+        conn.commit()
+        return True
+    except mysql.connector.Error:
+        return False
+    finally:
+        cursor.close()
 
-# ==========================================
-# FUNCIONES DE OBTENCIÓN DE DATOS (CACHÉ)
-# ==========================================
-@st.cache_data(ttl=600)  # Los datos se actualizan cada 10 minutos (600 segundos) para no saturar Aiven
-def cargar_compras_agiles():
+def login_usuario(username, password):
     conn = conectar_db()
-    if conn:
-        query = "SELECT * FROM compras_agiles"
-        df = pd.read_sql(query, conn)
-        # Asegurar formato de fechas
-        df['fecha_cierre'] = pd.to_datetime(df['fecha_cierre'])
-        df['fecha_publicacion'] = pd.to_datetime(df['fecha_publicacion'])
-        return df
-    return pd.DataFrame()
-
-@st.cache_data(ttl=3600) # Una vez por hora para los datos históricos
-def cargar_proveedores_historicos():
-    conn = conectar_db()
-    if conn:
-        query = "SELECT * FROM proveedores_historicos ORDER BY monto_total_adjudicado DESC"
-        df = pd.read_sql(query, conn)
-        return df
-    return pd.DataFrame()
-
-# ==========================================
-# SISTEMA DE AUTENTICACIÓN (LOGIN)
-# ==========================================
-def verificar_credenciales(username, password_ingresada):
-    conn = conectar_db()
-    if not conn:
-        return False, None
-    
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT password_hash, rol FROM usuarios WHERE username = %s", (username,))
-    usuario = cursor.fetchone()
+    cursor.execute("SELECT * FROM usuarios WHERE username = %s", (username,))
+    user = cursor.fetchone()
     cursor.close()
-    
-    if usuario:
-        # Verificar la contraseña hasheada
-        if bcrypt.checkpw(password_ingresada.encode('utf-8'), usuario['password_hash'].encode('utf-8')):
-            return True, usuario['rol']
-    return False, None
+    if user and verificar_password(password, user['password_hash']):
+        return user
+    return None
 
-def mostrar_pantalla_login():
-    st.markdown("<h1 style='text-align: center;'>🇨🇱 Radar Mercado Público: Compra Ágil</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center;'>Plataforma de inteligencia de negocios para licitaciones del estado.</p>", unsafe_allow_html=True)
-    
-    st.write("---")
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        st.subheader("Acceso a la Plataforma")
-        
-        # Pestañas para Login de Usuario o Acceso de Invitado
-        tab_login, tab_invitado = st.tabs(["🔒 Iniciar Sesión", "👀 Entrar como Invitado"])
-        
-        with tab_login:
-            with st.form("form_login"):
-                usuario_input = st.text_input("Usuario")
-                password_input = st.text_input("Contraseña", type="password")
-                btn_login = st.form_submit_button("Ingresar", use_container_width=True)
-                
-                if btn_login:
-                    valido, rol = verificar_credenciales(usuario_input, password_input)
-                    if valido:
-                        st.session_state['logueado'] = True
-                        st.session_state['rol'] = rol
-                        st.session_state['username'] = usuario_input
-                        st.rerun()
-                    else:
-                        st.error("❌ Usuario o contraseña incorrectos.")
-                        st.info("Tip: Prueba con el usuario 'usuario_demo' y clave 'password123'")
-                        
-        with tab_invitado:
-            st.write("El acceso de invitado te permite ver las oportunidades actuales, pero con funciones limitadas (sin filtros avanzados ni análisis de competencia).")
-            if st.button("Ingresar como Invitado", use_container_width=True):
-                st.session_state['logueado'] = True
-                st.session_state['rol'] = 'invitado'
-                st.session_state['username'] = 'Invitado'
-                st.rerun()
+def actualizar_palabras_clave(username, nuevas_palabras):
+    conn = conectar_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE usuarios SET palabras_clave = %s WHERE username = %s", (nuevas_palabras, username))
+    conn.commit()
+    cursor.close()
 
-# ==========================================
-# DASHBOARD PRINCIPAL
-# ==========================================
-def mostrar_dashboard():
-    # BARRA LATERAL (SIDEBAR)
-    st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/e/e0/Coat_of_arms_of_Chile.svg/200px-Coat_of_arms_of_Chile.svg.png", width=100)
-    st.sidebar.title("Menú de Navegación")
-    
-    st.sidebar.write(f"👤 **Usuario:** {st.session_state['username']}")
-    st.sidebar.write(f"🏷️ **Rol:** {st.session_state['rol'].capitalize()}")
-    st.sidebar.write("---")
-    
-    opcion_menu = st.sidebar.radio("Ir a:", ["📈 Oportunidades Activas", "🕵️ Análisis de Competencia"])
-    
-    if st.sidebar.button("🚪 Cerrar Sesión"):
-        st.session_state['logueado'] = False
-        st.session_state['rol'] = None
-        st.session_state['username'] = None
-        st.rerun()
+# ==============================================================================
+# MOTOR DE DATOS (ETL & CACHÉ)
+# ==============================================================================
+@st.cache_data(ttl=300) # Se actualiza cada 5 minutos
+def cargar_vista_oportunidades():
+    conn = conectar_db()
+    query = """
+        SELECT 
+            c.codigo, c.nombre, c.descripcion, comp.nombre as institucion, comp.region, 
+            c.direccion_entrega, c.monto_estimado, c.fecha_publicacion, c.fecha_cierre, 
+            c.estado, c.link_directo 
+        FROM compras_agiles c
+        LEFT JOIN compradores comp ON c.rut_comprador = comp.rut
+        WHERE c.estado != '8' -- Excluir las ya adjudicadas del panel principal
+    """
+    df = pd.read_sql(query, conn)
+    df['fecha_cierre'] = pd.to_datetime(df['fecha_cierre'])
+    df['fecha_publicacion'] = pd.to_datetime(df['fecha_publicacion'])
+    return df
 
-    # Cargar los datos a usar
-    df_compras = cargar_compras_agiles()
-    
-    if df_compras.empty:
-        st.warning("⚠️ No hay datos en la base de datos de compras ágiles. Asegúrate de ejecutar el script `extractor.py` primero.")
-        return
+@st.cache_data(ttl=600)
+def cargar_tabla_simple(tabla):
+    conn = conectar_db()
+    return pd.read_sql(f"SELECT * FROM {tabla}", conn)
 
-    # ----------------------------------------------------
-    # VISTA 1: OPORTUNIDADES ACTIVAS
-    # ----------------------------------------------------
-    if opcion_menu == "📈 Oportunidades Activas":
-        st.header("Licitaciones y Compras Ágiles Disponibles")
-        
-        # FILTROS
-        with st.expander("🔍 Filtros de Búsqueda", expanded=True):
-            col_f1, col_f2, col_f3 = st.columns(3)
-            
-            with col_f1:
-                # Filtro básico (Todos pueden usarlo)
-                lista_entidades = ["Todas"] + list(df_compras['entidad_compradora'].dropna().unique())
-                entidad_seleccionada = st.selectbox("Entidad Compradora", lista_entidades)
-                
-            with col_f2:
-                # Filtro de texto
-                palabra_clave = st.text_input("Buscar por nombre de licitación")
-                
-            with col_f3:
-                # FILTROS ESPECIALIZADOS (Solo usuarios registrados)
-                if st.session_state['rol'] in ['registrado', 'admin']:
-                    monto_min = st.number_input("Monto mínimo estimado ($)", min_value=0.0, value=0.0, step=10000.0)
-                    st.caption("✨ Filtro avanzado habilitado")
+def calcular_tiempo_restante(fecha_cierre):
+    ahora = datetime.now()
+    if pd.isna(fecha_cierre) or fecha_cierre < ahora:
+        return "Cerrada"
+    diferencia = fecha_cierre - ahora
+    dias = diferencia.days
+    horas = diferencia.seconds // 3600
+    if dias > 0:
+        return f"{dias}d {horas}h"
+    return f"{horas}h {(diferencia.seconds % 3600) // 60}m"
+
+def determinar_llamado(descripcion):
+    desc = str(descripcion).lower()
+    if "segundo llamado" in desc or "2do llamado" in desc or "2° llamado" in desc:
+        return "2do Llamado"
+    return "1er Llamado"
+
+def calcular_match(texto, palabras_clave_usuario):
+    """Calcula un % de coincidencia (1-100) basado en las palabras clave del perfil."""
+    if not palabras_clave_usuario: return 0
+    palabras = [p.strip().lower() for p in palabras_clave_usuario.split(",")]
+    texto_evaluar = str(texto).lower()
+    
+    coincidencias = sum(1 for palabra in palabras if palabra in texto_evaluar)
+    score = (coincidencias / len(palabras)) * 100
+    return min(100, int(score))
+
+# ==============================================================================
+# INTERFAZ GRÁFICA (PANTALLAS)
+# ==============================================================================
+
+# Manejo de sesión
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+    st.session_state["user_data"] = None
+
+if not st.session_state["logged_in"]:
+    st.markdown("<h1 style='text-align: center;'>🔐 Acceso a Radar Compra Ágil</h1>", unsafe_allow_html=True)
+    tab_login, tab_registro = st.tabs(["Iniciar Sesión", "Crear Cuenta"])
+    
+    with tab_login:
+        with st.form("login_form"):
+            user = st.text_input("Usuario")
+            pw = st.text_input("Contraseña", type="password")
+            if st.form_submit_button("Ingresar"):
+                data = login_usuario(user, pw)
+                if data:
+                    st.session_state["logged_in"] = True
+                    st.session_state["user_data"] = data
+                    st.rerun()
                 else:
-                    monto_min = 0.0
-                    st.info("🔒 Inicia sesión para filtrar por montos.")
+                    st.error("Usuario o contraseña incorrectos.")
+                    
+    with tab_registro:
+        with st.form("reg_form"):
+            new_user = st.text_input("Nuevo Usuario")
+            new_pw = st.text_input("Contraseña", type="password")
+            preferencias = st.text_area("¿Qué vendes? (Separado por comas. Ej: computadores, madera, aseo, licencias)")
+            if st.form_submit_button("Registrarse"):
+                if registrar_usuario(new_user, new_pw, preferencias):
+                    st.success("Cuenta creada con éxito. Por favor, inicia sesión.")
+                else:
+                    st.error("Error: El usuario ya existe o hubo un problema.")
 
-        # Aplicar Filtros al DataFrame
-        df_filtrado = df_compras.copy()
-        if entidad_seleccionada != "Todas":
-            df_filtrado = df_filtrado[df_filtrado['entidad_compradora'] == entidad_seleccionada]
-        if palabra_clave:
-            df_filtrado = df_filtrado[df_filtrado['nombre_licitacion'].str.contains(palabra_clave, case=False, na=False)]
-        if monto_min > 0:
-            df_filtrado = df_filtrado[df_filtrado['monto_estimado'] >= monto_min]
-
-        # KPIs (Tarjetas de resumen)
-        st.write("### Resumen de Oportunidades")
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("Licitaciones Mostradas", len(df_filtrado))
-        kpi2.metric("Monto Total Estimado", f"${df_filtrado['monto_estimado'].sum():,.0f}")
-        kpi3.metric("Promedio por Licitación", f"${df_filtrado['monto_estimado'].mean():,.0f}" if len(df_filtrado)>0 else "$0")
-        kpi4.metric("Entidades Solicitantes", df_filtrado['entidad_compradora'].nunique())
-
-        st.write("---")
-
-        # GRÁFICOS
-        st.write("### Análisis Visual de Demanda")
-        graf1, graf2 = st.columns(2)
-        
-        with graf1:
-            # Gráfico: ¿Qué días se licita más? (Basado en la fecha de cierre)
-            df_filtrado['dia_cierre'] = df_filtrado['fecha_cierre'].dt.date
-            conteo_dias = df_filtrado.groupby('dia_cierre').size().reset_index(name='Cantidad')
-            
-            fig_dias = px.line(conteo_dias, x='dia_cierre', y='Cantidad', 
-                               title='Volumen de Licitaciones por Fecha de Cierre',
-                               markers=True, line_shape='spline', template='plotly_white')
-            fig_dias.update_xaxes(title="Fecha")
-            fig_dias.update_yaxes(title="N° de Licitaciones")
-            st.plotly_chart(fig_dias, use_container_width=True)
-
-        with graf2:
-            # Gráfico: ¿Qué entidades solicitan más?
-            conteo_entidad = df_filtrado['entidad_compradora'].value_counts().head(10).reset_index()
-            conteo_entidad.columns = ['Entidad', 'Cantidad']
-            
-            fig_entidad = px.bar(conteo_entidad, x='Cantidad', y='Entidad', 
-                                 title='Top 10 Entidades con más Compras Ágiles',
-                                 orientation='h', color='Cantidad', template='plotly_white')
-            fig_entidad.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_entidad, use_container_width=True)
-
-        # TABLA DE DATOS
-        st.write("### Detalle de Licitaciones")
-        # Formatear montos y fechas para que se vean bien en la tabla
-        df_mostrar = df_filtrado.copy()
-        df_mostrar['monto_estimado'] = df_mostrar['monto_estimado'].apply(lambda x: f"${x:,.0f}")
-        df_mostrar['fecha_cierre'] = df_mostrar['fecha_cierre'].dt.strftime('%d-%m-%Y %H:%M')
-        
-        st.dataframe(
-            df_mostrar[['codigo', 'nombre_licitacion', 'entidad_compradora', 'monto_estimado', 'fecha_cierre', 'estado']],
-            use_container_width=True,
-            hide_index=True
-        )
-
-    # ----------------------------------------------------
-    # VISTA 2: ANÁLISIS DE COMPETENCIA
-    # ----------------------------------------------------
-    elif opcion_menu == "🕵️ Análisis de Competencia":
-        st.header("Análisis de Proveedores (Tu Competencia)")
-        
-        # Bloquear vista para invitados
-        if st.session_state['rol'] == 'invitado':
-            st.warning("🔒 Esta sección es exclusiva para usuarios registrados.")
-            st.write("Aquí podrás investigar qué empresas ganan generalmente las compras ágiles, ver sus montos adjudicados y analizar su comportamiento para mejorar tu estrategia comercial.")
-            st.image("https://images.unsplash.com/photo-1460925895917-afdab827c52f?ixlib=rb-4.0.3&auto=format&fit=crop&w=1200&q=80", use_column_width=True)
-            return
-
-        df_prov = cargar_proveedores_historicos()
-        
-        if df_prov.empty:
-            st.info("No hay datos históricos de proveedores aún. El sistema se irá alimentando con el tiempo.")
-            return
-            
-        st.write("Investiga quiénes dominan el mercado y cuáles son los montos promedio que se adjudican.")
-        
-        c1, c2 = st.columns(2)
-        
-        with c1:
-            st.write("#### Relación: Adjudicaciones vs Montos Ganados")
-            fig_scatter = px.scatter(df_prov, x='cantidad_adjudicaciones', y='monto_total_adjudicado',
-                                     hover_name='razon_social', size='cantidad_adjudicaciones',
-                                     color='monto_total_adjudicado', color_continuous_scale='Viridis',
-                                     title="Mapa de Competidores (Burbujas)",
-                                     labels={'cantidad_adjudicaciones': 'N° de Adjudicaciones', 
-                                             'monto_total_adjudicado': 'Monto Total Ganado ($)'})
-            st.plotly_chart(fig_scatter, use_container_width=True)
-            
-        with c2:
-            st.write("#### Top Competidores por Dinero Adjudicado")
-            top_prov = df_prov.head(10)
-            fig_bar_prov = px.bar(top_prov, x='razon_social', y='monto_total_adjudicado',
-                                  text_auto='.2s', title="Top 10 Empresas con más ingresos",
-                                  labels={'razon_social': 'Empresa', 'monto_total_adjudicado': 'Monto ($)'})
-            fig_bar_prov.update_traces(textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
-            st.plotly_chart(fig_bar_prov, use_container_width=True)
-
-        st.write("#### Base de Datos de Competidores")
-        st.dataframe(df_prov, use_container_width=True, hide_index=True)
-
-
-# ==========================================
-# RUTEO PRINCIPAL
-# ==========================================
-if not st.session_state['logueado']:
-    mostrar_pantalla_login()
 else:
-    mostrar_dashboard()
+    # --- APLICACIÓN PRINCIPAL (Usuario Logueado) ---
+    usuario_actual = st.session_state["user_data"]
+    
+    # BARRA LATERAL
+    with st.sidebar:
+        st.title(f"👤 Hola, {usuario_actual['username']}")
+        st.write("---")
+        st.subheader("⚙️ Configuración del Algoritmo")
+        mis_palabras = st.text_area("Mis Palabras Clave:", value=usuario_actual['palabras_clave'])
+        if st.button("Actualizar Perfil"):
+            actualizar_palabras_clave(usuario_actual['username'], mis_palabras)
+            st.session_state["user_data"]['palabras_clave'] = mis_palabras
+            st.success("Algoritmo actualizado")
+            st.rerun()
+            
+        st.write("---")
+        if st.button("Cerrar Sesión"):
+            st.session_state["logged_in"] = False
+            st.session_state["user_data"] = None
+            st.rerun()
+
+    # DASHBOARD
+    st.title("📊 Centro de Inteligencia: Compra Ágil Chile")
+    tab_oportunidades, tab_compradores, tab_proveedores = st.tabs(["🛒 Oportunidades Abiertas", "🏢 Análisis de Compradores", "🤝 Inteligencia Competitiva"])
+    
+    with tab_oportunidades:
+        df_opps = cargar_vista_oportunidades()
+        
+        if not df_opps.empty:
+            # Procesamiento de Columnas Especiales
+            df_opps['Tiempo Restante'] = df_opps['fecha_cierre'].apply(calcular_tiempo_restante)
+            df_opps['Llamado'] = df_opps['descripcion'].apply(determinar_llamado)
+            
+            # Aplicar Algoritmo de Match
+            keywords = st.session_state["user_data"].get('palabras_clave', '')
+            df_opps['Match (%)'] = df_opps.apply(lambda row: calcular_match(row['nombre'] + " " + row['descripcion'], keywords), axis=1)
+            
+            # Ordenar para mostrar lo más relevante y urgente primero
+            df_opps = df_opps.sort_values(by=['Match (%)', 'fecha_cierre'], ascending=[False, True])
+
+            # Filtros Interactivos
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                filtro_region = st.multiselect("Filtrar por Región:", df_opps['region'].dropna().unique())
+            with col2:
+                rango_monto = st.slider("Presupuesto Máximo ($):", 0, int(df_opps['monto_estimado'].max()), int(df_opps['monto_estimado'].max()))
+            with col3:
+                busqueda_libre = st.text_input("Búsqueda específica (Ej: Notebooks)")
+
+            # Aplicar Filtros
+            df_filtrado = df_opps.copy()
+            if filtro_region:
+                df_filtrado = df_filtrado[df_filtrado['region'].isin(filtro_region)]
+            df_filtrado = df_filtrado[df_filtrado['monto_estimado'] <= rango_monto]
+            if busqueda_libre:
+                df_filtrado = df_filtrado[df_filtrado.apply(lambda row: row.astype(str).str.contains(busqueda_libre, case=False).any(), axis=1)]
+
+            # Tabla Interactiva Final
+            st.dataframe(
+                df_filtrado[['Match (%)', 'Tiempo Restante', 'Llamado', 'nombre', 'institucion', 'monto_estimado', 'link_directo']],
+                column_config={
+                    "Match (%)": st.column_config.ProgressColumn("Afinidad", help="Basado en tus palabras clave", format="%d%%", min_value=0, max_value=100),
+                    "monto_estimado": st.column_config.NumberColumn("Presupuesto", format="$%d"),
+                    "link_directo": st.column_config.LinkColumn("Acción", display_text="Ir a Ofertar ↗️")
+                },
+                hide_index=True, use_container_width=True, height=500
+            )
+        else:
+            st.info("No hay oportunidades abiertas en la base de datos en este momento.")
+
+    with tab_compradores:
+        st.subheader("🏢 Quién está comprando más en el Estado")
+        df_comp = cargar_tabla_simple("compradores")
+        if not df_comp.empty and not df_opps.empty:
+            volumen_por_region = df_comp['region'].value_counts().reset_index()
+            volumen_por_region.columns = ['Región', 'Cantidad de Entidades']
+            
+            col_chart1, col_chart2 = st.columns(2)
+            with col_chart1:
+                fig1 = px.pie(volumen_por_region, values='Cantidad de Entidades', names='Región', title="Distribución de Compradores por Región", hole=0.4)
+                st.plotly_chart(fig1, use_container_width=True)
+                
+            with col_chart2:
+                top_compradores = df_opps['institucion'].value_counts().head(10).reset_index()
+                top_compradores.columns = ['Institución', 'Cotizaciones Activas']
+                fig2 = px.bar(top_compradores, x='Cotizaciones Activas', y='Institución', orientation='h', title="Top 10 Entidades con más demanda actual")
+                st.plotly_chart(fig2, use_container_width=True)
+
+    with tab_proveedores:
+        st.subheader("🤝 Inteligencia Competitiva: Tus Rivales")
+        df_prov = cargar_tabla_simple("proveedores")
+        if not df_prov.empty:
+            df_prov = df_prov.sort_values(by="monto_total_ganado", ascending=False).head(50)
+            
+            fig3 = px.scatter(
+                df_prov, x="cantidad_adjudicaciones", y="monto_total_ganado", 
+                text="nombre", size="monto_total_ganado", color="monto_total_ganado",
+                title="Mapa de Dominio de Proveedores (Top 50)",
+                labels={"cantidad_adjudicaciones": "Veces que ha ganado", "monto_total_ganado": "Dinero Acumulado ($)"}
+            )
+            fig3.update_traces(textposition='top center')
+            st.plotly_chart(fig3, use_container_width=True)
+            
+            st.dataframe(
+                df_prov[['nombre', 'cantidad_adjudicaciones', 'monto_total_ganado']],
+                column_config={"monto_total_ganado": st.column_config.NumberColumn("Monto Adjudicado Total", format="$%d")},
+                hide_index=True, use_container_width=True
+            )
