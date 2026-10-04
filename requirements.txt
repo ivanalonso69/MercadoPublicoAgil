@@ -1,7 +1,8 @@
 streamlit
 pandas
-mysql-connector-python
 plotly
 bcrypt
+mysql-connector-python
 python-dotenv
 requests
+urllib3
