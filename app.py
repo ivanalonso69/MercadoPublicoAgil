@@ -18,11 +18,17 @@ load_dotenv()
 # ==============================================================================
 @st.cache_resource
 def conectar_db():
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST"), port=os.getenv("DB_PORT"),
-        user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),
-        database=os.getenv("DB_NAME")
-    )
+    try:
+        return mysql.connector.connect(
+            host=st.secrets.get("DB_HOST", os.getenv("DB_HOST")),
+            port=st.secrets.get("DB_PORT", os.getenv("DB_PORT")),
+            user=st.secrets.get("DB_USER", os.getenv("DB_USER")),
+            password=st.secrets.get("DB_PASSWORD", os.getenv("DB_PASSWORD")),
+            database=st.secrets.get("DB_NAME", os.getenv("DB_NAME"))
+        )
+    except Exception as e:
+        st.error(f"Falla crítica de conexión: {e}")
+        return None
 
 # ==============================================================================
 # SISTEMA DE AUTENTICACIÓN (LOGIN / REGISTRO)
@@ -35,15 +41,18 @@ def verificar_password(password, password_hash):
 
 def registrar_usuario(username, password, palabras_clave):
     conn = conectar_db()
+    if not conn: 
+        return False, "No hay conexión a la base de datos de Aiven."
+    
     cursor = conn.cursor()
     try:
         hash_pw = hashear_password(password)
         cursor.execute("INSERT INTO usuarios (username, password_hash, palabras_clave) VALUES (%s, %s, %s)", 
                        (username, hash_pw, palabras_clave))
         conn.commit()
-        return True
-    except mysql.connector.Error:
-        return False
+        return True, "Registro exitoso"
+    except mysql.connector.Error as err:
+        return False, f"Error SQL: {err}"
     finally:
         cursor.close()
 
@@ -148,11 +157,11 @@ if not st.session_state["logged_in"]:
             new_pw = st.text_input("Contraseña", type="password")
             preferencias = st.text_area("¿Qué vendes? (Separado por comas. Ej: computadores, madera, aseo, licencias)")
             if st.form_submit_button("Registrarse"):
-                if registrar_usuario(new_user, new_pw, preferencias):
-                    st.success("Cuenta creada con éxito. Por favor, inicia sesión.")
+                exito, mensaje = registrar_usuario(new_user, new_pw, preferencias)
+                if exito:
+                    st.success("Cuenta creada con éxito. Por favor, inicia sesión en la pestaña de al lado.")
                 else:
-                    st.error("Error: El usuario ya existe o hubo un problema.")
-
+                    st.error(f"Error al registrar: {mensaje}")
 else:
     # --- APLICACIÓN PRINCIPAL (Usuario Logueado) ---
     usuario_actual = st.session_state["user_data"]
